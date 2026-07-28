@@ -36,11 +36,22 @@ st.markdown("Upload your dataset and the pipeline runs automatically.")
 # ─────────────────────────────────────────────
 st.sidebar.title("⚙️ Controls")
 
-# Allow upload OR auto-load from data/ folder
-_DEFAULT_PATH = os.path.join(os.path.dirname(__file__), "data", "Telco_customer_churn.xlsx")
+# Allow upload OR auto-load from dataset path
+possible_paths = [
+    os.path.join(os.path.dirname(__file__), "churn_app", "data", "Telco_customer_churn.xlsx"),
+    os.path.join(os.path.dirname(__file__), "data", "Telco_customer_churn.xlsx"),
+    os.path.join(os.path.dirname(__file__), "Telco_customer_churn.xlsx"),
+    "Telco_customer_churn.xlsx",
+]
+_DEFAULT_PATH = None
+for p in possible_paths:
+    if os.path.exists(p):
+        _DEFAULT_PATH = p
+        break
+
 uploaded_file = st.sidebar.file_uploader("Upload Telco_customer_churn.xlsx", type=["xlsx"])
-if uploaded_file is None and os.path.exists(_DEFAULT_PATH):
-    st.sidebar.info("Using bundled dataset from `data/` folder.")
+if uploaded_file is None and _DEFAULT_PATH and os.path.exists(_DEFAULT_PATH):
+    st.sidebar.info("Using bundled dataset.")
     uploaded_file = _DEFAULT_PATH  # pass path string; handled below
 
 model_choice = st.sidebar.selectbox(
@@ -68,7 +79,7 @@ def load_and_preprocess(file):
     raw = df.copy()
 
     df['Total Charges'] = pd.to_numeric(df['Total Charges'], errors='coerce')
-    df['Total Charges'].fillna(df['Total Charges'].median(), inplace=True)
+    df['Total Charges'] = df['Total Charges'].fillna(df['Total Charges'].median())
 
     existing_drop = [c for c in DROP_COLS if c in df.columns]
     df.drop(columns=existing_drop, inplace=True)
@@ -307,7 +318,7 @@ if uploaded_file and run_btn:
         model = trained[model_choice]
         df_temp = raw_df.copy()
         df_temp['Total Charges'] = pd.to_numeric(df_temp['Total Charges'], errors='coerce')
-        df_temp['Total Charges'].fillna(df_temp['Total Charges'].median(), inplace=True)
+        df_temp['Total Charges'] = df_temp['Total Charges'].fillna(df_temp['Total Charges'].median())
 
         churn_prob_all = model.predict_proba(X)[:, 1]
         seg_df = pd.DataFrame({
@@ -323,7 +334,7 @@ if uploaded_file and run_btn:
         with st.spinner("Running KMeans + Silhouette..."):
             wcss, sil = [], []
             for k in range(2, 10):
-                km = KMeans(n_clusters=k, random_state=42)
+                km = KMeans(n_clusters=k, n_init=10, random_state=42)
                 lbl = km.fit_predict(scaled)
                 wcss.append(km.inertia_)
                 sil.append(silhouette_score(scaled, lbl))
@@ -343,7 +354,7 @@ if uploaded_file and run_btn:
             ax.set_xlabel("k"); ax.legend()
             plt.tight_layout(); st.pyplot(fig)
 
-        km_final = KMeans(n_clusters=n_clusters, random_state=42)
+        km_final = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
         seg_df['Cluster'] = km_final.fit_predict(scaled)
 
         # Auto-name by churn probability
@@ -376,7 +387,7 @@ if uploaded_file and run_btn:
         with col_d:
             seg_counts = seg_df['Segment'].value_counts()
             fig, ax = plt.subplots(figsize=(5, 4))
-            seg_counts.plot(kind='bar', ax=ax, color=['steelblue','salmon','green','orange'])
+            seg_counts.plot(kind='bar', ax=ax, colormap='Set2')
             ax.set_title("Customers per Segment")
             ax.set_ylabel("Count")
             plt.xticks(rotation=20)
@@ -412,7 +423,7 @@ if uploaded_file and run_btn:
             st.subheader("💰 Monthly Revenue at Risk")
             fig, ax = plt.subplots(figsize=(7, 3))
             profile['Revenue_at_Risk'].sort_values().plot(
-                kind='barh', ax=ax, color=['green','orange','red']
+                kind='barh', ax=ax, colormap='Set2'
             )
             ax.set_title("Revenue at Risk per Segment ($)")
             plt.tight_layout(); st.pyplot(fig)
@@ -467,4 +478,3 @@ else:
     | 🗂️ Segments | KMeans clustering with auto optimal k selection |
     | 💡 Recommendations | Revenue at risk + actionable business strategies |
     """)
-
