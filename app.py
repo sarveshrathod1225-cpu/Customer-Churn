@@ -23,13 +23,13 @@ from sklearn.metrics import silhouette_score
 # PAGE CONFIG
 # ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="Churn Prediction & Segmentation Dashboard",
+    page_title="Universal Churn & Segmentation Intelligence Dashboard",
     page_icon="📡",
     layout="wide"
 )
 
-st.title("📡 Universal Telco Churn & Segmentation Intelligence Dashboard")
-st.markdown("Upload any customer dataset (Excel or CSV). The machine learning pipeline runs automatically.")
+st.title("📡 Universal Telco Churn & Customer Segmentation Dashboard")
+st.markdown("Upload any customer dataset (Excel or CSV). The pipeline auto-detects schema, cleans data, and runs ML models safely.")
 
 # ─────────────────────────────────────────────
 # SIDEBAR & DATA LOADING
@@ -65,7 +65,7 @@ model_choice = st.sidebar.selectbox(
 n_clusters = st.sidebar.slider("Number of Segments (k)", 2, 8, 3)
 
 # ─────────────────────────────────────────────
-# ROBUST HELPER FUNCTIONS
+# ROBUST & CRASH-PROOF HELPER FUNCTIONS
 # ─────────────────────────────────────────────
 
 def _clean_str(s):
@@ -75,17 +75,29 @@ def _clean_str(s):
 def load_raw_dataframe(file):
     if isinstance(file, str):
         if file.lower().endswith('.csv'):
-            return pd.read_csv(file)
+            for sep in [',', ';', '\t', '|']:
+                try:
+                    df = pd.read_csv(file, sep=sep)
+                    if df.shape[1] > 1:
+                        return df
+                except Exception:
+                    pass
+            return pd.read_csv(file, encoding='latin1')
         else:
             return pd.read_excel(file)
     else:
         filename = file.name.lower()
         if filename.endswith('.csv'):
-            try:
-                return pd.read_csv(file)
-            except Exception:
-                file.seek(0)
-                return pd.read_csv(file, encoding='latin1')
+            for sep in [',', ';', '\t', '|']:
+                try:
+                    file.seek(0)
+                    df = pd.read_csv(file, sep=sep)
+                    if df.shape[1] > 1:
+                        return df
+                except Exception:
+                    pass
+            file.seek(0)
+            return pd.read_csv(file, encoding='latin1')
         else:
             try:
                 return pd.read_excel(file)
@@ -98,7 +110,7 @@ def auto_detect_columns(df):
     
     # Target
     target_col = None
-    priority_targets = ['churnvalue', 'churnlabel', 'churn', 'target', 'exited', 'churned', 'is_churn', 'churn_flag', 'label', 'class', 'response']
+    priority_targets = ['churnvalue', 'churnlabel', 'churn', 'target', 'exited', 'churned', 'is_churn', 'churn_flag', 'label', 'class', 'response', 'status']
     for key in priority_targets:
         if key in clean_cols:
             target_col = clean_cols[key]
@@ -106,7 +118,7 @@ def auto_detect_columns(df):
     if not target_col:
         for c in df.columns:
             cl = c.lower()
-            if 'churn' in cl or 'target' in cl or 'exited' in cl:
+            if 'churn' in cl or 'target' in cl or 'exited' in cl or 'status' in cl:
                 target_col = c
                 break
     if not target_col:
@@ -127,7 +139,7 @@ def auto_detect_columns(df):
 
     # Monthly Charges
     monthly_col = None
-    for k in ['monthlycharges', 'monthly_charges', 'monthlycharge', 'monthly_charge', 'monthlyamount', 'monthlypay', 'monthlyrate']:
+    for k in ['monthlycharges', 'monthly_charges', 'monthlycharge', 'monthly_charge', 'monthlyamount', 'monthlypay', 'monthlyrate', 'cost', 'charge']:
         if k in clean_cols:
             monthly_col = clean_cols[k]
             break
@@ -154,18 +166,35 @@ def auto_detect_columns(df):
 def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
     df = raw_df.copy()
 
-    # Target (Y)
+    # Clean Target (Y) safely
+    if target_col not in df.columns:
+        target_col = df.columns[-1]
+
     y_raw = df[target_col]
-    if pd.api.types.is_numeric_dtype(y_raw) and set(y_raw.dropna().unique()).issubset({0, 1}):
-        y_binary = y_raw.astype(int)
+    
+    # Handle continuous vs categorical vs binary target
+    if pd.api.types.is_numeric_dtype(y_raw):
+        unique_vals = set(y_raw.dropna().unique())
+        if unique_vals.issubset({0, 1}):
+            y_binary = y_raw.fillna(0).astype(int)
+        elif y_raw.nunique() > 10:
+            # Continuous numeric target (e.g. churn score/probability) -> binarize at median
+            med = y_raw.median()
+            y_binary = (y_raw >= med).astype(int)
+        else:
+            # Multi-class integer
+            le_target = LabelEncoder()
+            y_binary = pd.Series(le_target.fit_transform(y_raw.fillna(0).astype(str)), index=df.index)
+            y_binary = (y_binary > 0).astype(int)
     else:
         y_str = y_raw.astype(str).str.strip().str.lower()
-        pos_words = {'yes', 'true', '1', 'churned', 'y', '1.0', 'positive', 'pos', 'exited'}
+        pos_words = {'yes', 'true', '1', 'churned', 'y', '1.0', 'positive', 'pos', 'exited', 'leave', 'left'}
         if any(val in pos_words for val in y_str.unique()):
             y_binary = y_str.isin(pos_words).astype(int)
         else:
             le_target = LabelEncoder()
-            y_binary = pd.Series(le_target.fit_transform(y_raw), index=df.index)
+            encoded = le_target.fit_transform(y_str)
+            y_binary = pd.Series((encoded > 0).astype(int), index=df.index)
 
     df['Churn Value'] = y_binary
     df['Churn Label'] = np.where(y_binary == 1, 'Yes', 'No')
@@ -176,9 +205,8 @@ def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
             df[tenure_col].astype(str).str.replace(',', '', regex=False).str.strip(),
             errors='coerce'
         )
-        df['Tenure Months'] = df['Tenure Months'].fillna(
-            df['Tenure Months'].median() if not df['Tenure Months'].isna().all() else 0
-        )
+        med_t = df['Tenure Months'].median()
+        df['Tenure Months'] = df['Tenure Months'].fillna(med_t if not pd.isna(med_t) else 12)
     else:
         df['Tenure Months'] = 12
 
@@ -188,9 +216,8 @@ def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
             df[monthly_col].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
             errors='coerce'
         )
-        df['Monthly Charges'] = df['Monthly Charges'].fillna(
-            df['Monthly Charges'].median() if not df['Monthly Charges'].isna().all() else 0
-        )
+        med_m = df['Monthly Charges'].median()
+        df['Monthly Charges'] = df['Monthly Charges'].fillna(med_m if not pd.isna(med_m) else 50.0)
     else:
         df['Monthly Charges'] = 50.0
 
@@ -200,9 +227,8 @@ def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
             df[total_col].astype(str).str.replace('$', '', regex=False).str.replace(',', '', regex=False).str.strip(),
             errors='coerce'
         )
-        df['Total Charges'] = df['Total Charges'].fillna(
-            df['Total Charges'].median() if not df['Total Charges'].isna().all() else 0
-        )
+        med_tot = df['Total Charges'].median()
+        df['Total Charges'] = df['Total Charges'].fillna(med_tot if not pd.isna(med_tot) else df['Tenure Months'] * df['Monthly Charges'])
     else:
         df['Total Charges'] = df['Tenure Months'] * df['Monthly Charges']
 
@@ -224,15 +250,21 @@ def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
     if 'Churn Value' in X_df.columns:
         X_df = X_df.drop(columns=['Churn Value'])
 
-    # Encode remaining object columns
-    for col in X_df.select_dtypes(include=['object', 'category']).columns:
-        le = LabelEncoder()
-        X_df[col] = le.fit_transform(X_df[col].fillna('Missing').astype(str))
+    # Ensure at least 1 feature column exists
+    if X_df.shape[1] == 0:
+        X_df['_dummy_feature'] = np.ones(len(df))
 
-    # Fill numeric NaNs
-    for col in X_df.select_dtypes(include=[np.number]).columns:
-        X_df[col] = X_df[col].fillna(X_df[col].median() if not X_df[col].isna().all() else 0)
+    # Encode remaining object/category columns safely
+    for col in X_df.columns:
+        if X_df[col].dtype == 'object' or isinstance(X_df[col].dtype, pd.CategoricalDtype):
+            le = LabelEncoder()
+            X_df[col] = le.fit_transform(X_df[col].fillna('Missing').astype(str))
+        else:
+            X_df[col] = pd.to_numeric(X_df[col], errors='coerce')
+            med_val = X_df[col].median()
+            X_df[col] = X_df[col].fillna(med_val if not pd.isna(med_val) else 0)
 
+    X_df = X_df.replace([np.inf, -np.inf], 0).fillna(0)
     Y = df['Churn Value']
 
     mapping_info = {
@@ -244,6 +276,14 @@ def preprocess_dataset(raw_df, target_col, tenure_col, monthly_col, total_col):
     }
 
     return raw_df, df, X_df, Y, mapping_info
+
+def safe_auc_score(y_true, y_prob):
+    try:
+        if len(np.unique(y_true)) > 1:
+            return round(roc_auc_score(y_true, y_prob), 4)
+    except Exception:
+        pass
+    return 0.0
 
 # Sidebar column selection & manual override
 if uploaded_file is not None:
@@ -297,355 +337,371 @@ else:
 if uploaded_file and (run_btn or 'pipeline_run' in st.session_state):
     st.session_state['pipeline_run'] = True
 
-    raw_df, df, X, Y, mapping_info = preprocess_dataset(
-        raw_df_loaded, sel_target, final_tenure, final_monthly, final_total
-    )
+    try:
+        raw_df, df, X, Y, mapping_info = preprocess_dataset(
+            raw_df_loaded, sel_target, final_tenure, final_monthly, final_total
+        )
 
-    X_train, X_test, Y_train, Y_test = train_test_split(
-        X, Y, test_size=0.2, random_state=42, stratify=Y if Y.nunique() > 1 else None
-    )
+        # Safe train-test split (handle small datasets or single-class distributions)
+        class_counts = Y.value_counts()
+        can_stratify = (Y.nunique() > 1) and (class_counts.min() >= 2) and (len(Y) >= 5)
 
-    # ── TABS ──────────────────────────────────
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🔍 EDA", "🏆 Model", "📊 Evaluation", "🗂️ Segments", "💡 Recommendations"
-    ])
+        X_train, X_test, Y_train, Y_test = train_test_split(
+            X, Y, test_size=0.2 if len(Y) >= 10 else 0.5, random_state=42,
+            stratify=Y if can_stratify else None
+        )
 
-    # ══════════════════════════════════════════
-    # TAB 1 — EDA
-    # ══════════════════════════════════════════
-    with tab1:
-        st.header("🔍 Exploratory Data Analysis")
+        # ── TABS ──────────────────────────────────
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "🔍 EDA", "🏆 Model", "📊 Evaluation", "🗂️ Segments", "💡 Recommendations"
+        ])
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Customers", raw_df.shape[0])
-        col2.metric("Total Features", raw_df.shape[1])
-        churn_pct = round(df['Churn Value'].mean() * 100, 1)
-        col3.metric("Churn Rate", f"{churn_pct}%")
-        col4.metric("Non-Churn Rate", f"{round(100 - churn_pct, 1)}%")
+        # ══════════════════════════════════════════
+        # TAB 1 — EDA
+        # ══════════════════════════════════════════
+        with tab1:
+            st.header("🔍 Exploratory Data Analysis")
 
-        st.subheader("Data Preview")
-        st.dataframe(raw_df.head(10), use_container_width=True)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Customers", raw_df.shape[0])
+            col2.metric("Total Features", raw_df.shape[1])
+            churn_pct = round(df['Churn Value'].mean() * 100, 1)
+            col3.metric("Churn Rate", f"{churn_pct}%")
+            col4.metric("Non-Churn Rate", f"{round(100 - churn_pct, 1)}%")
 
-        col_a, col_b = st.columns(2)
+            st.subheader("Data Preview")
+            st.dataframe(raw_df.head(10), use_container_width=True)
 
-        with col_a:
-            st.subheader("Churn Distribution")
-            fig, ax = plt.subplots(figsize=(5, 3))
-            df['Churn Label'].value_counts().plot(
-                kind='bar', ax=ax, color=['steelblue', 'salmon']
-            )
-            ax.set_title("Churn Label Counts")
-            ax.set_xlabel("")
-            ax.set_ylabel("Count")
+            col_a, col_b = st.columns(2)
+
+            with col_a:
+                st.subheader("Churn Distribution")
+                fig, ax = plt.subplots(figsize=(5, 3))
+                df['Churn Label'].value_counts().plot(
+                    kind='bar', ax=ax, color=['steelblue', 'salmon']
+                )
+                ax.set_title("Churn Label Counts")
+                ax.set_xlabel("")
+                ax.set_ylabel("Count")
+                plt.xticks(rotation=0)
+                plt.tight_layout()
+                st.pyplot(fig)
+
+            with col_b:
+                st.subheader("Tenure Distribution")
+                fig, ax = plt.subplots(figsize=(5, 3))
+                sns.histplot(df['Tenure Months'], bins=min(30, max(5, df['Tenure Months'].nunique())), kde=True, ax=ax, color='steelblue')
+                ax.set_title("Tenure Months")
+                plt.tight_layout()
+                st.pyplot(fig)
+
+            col_c, col_d = st.columns(2)
+
+            with col_c:
+                st.subheader("Monthly Charges Distribution")
+                fig, ax = plt.subplots(figsize=(5, 3))
+                sns.histplot(df['Monthly Charges'], bins=min(30, max(5, df['Monthly Charges'].nunique())), kde=True, ax=ax, color='green')
+                plt.tight_layout()
+                st.pyplot(fig)
+
+            with col_d:
+                st.subheader("Correlation Heatmap")
+                num_cols = ['Tenure Months', 'Monthly Charges', 'Total Charges', 'Churn Value']
+                num_cols = [c for c in num_cols if c in df.columns]
+                fig, ax = plt.subplots(figsize=(5, 4))
+                sns.heatmap(df[num_cols].corr(), annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
+                plt.tight_layout()
+                st.pyplot(fig)
+
+            st.subheader("Missing Values Summary")
+            missing = raw_df.isnull().sum()
+            missing = missing[missing > 0]
+            if len(missing) == 0:
+                st.success("✅ No missing values found in raw dataset!")
+            else:
+                st.warning(f"⚠️ {len(missing)} columns have missing values")
+                st.bar_chart(missing)
+
+        # ══════════════════════════════════════════
+        # TAB 2 — MODEL TRAINING
+        # ══════════════════════════════════════════
+        with tab2:
+            st.header("🏆 Model Training & Comparison")
+
+            with st.spinner("Training classification models..."):
+                all_models = {
+                    "Random Forest": RandomForestClassifier(
+                        n_estimators=100, max_depth=10,
+                        random_state=42, class_weight='balanced' if Y_train.nunique() > 1 else None
+                    ),
+                    "Gradient Boosting": GradientBoostingClassifier(
+                        n_estimators=100, max_depth=5, random_state=42
+                    ),
+                    "Logistic Regression": LogisticRegression(
+                        max_iter=1000, random_state=42, class_weight='balanced' if Y_train.nunique() > 1 else None
+                    )
+                }
+                results = []
+                trained = {}
+                for name, m in all_models.items():
+                    m.fit(X_train, Y_train)
+                    yp = m.predict(X_test)
+                    trained[name] = m
+                    
+                    prob = m.predict_proba(X_test)[:, 1] if hasattr(m, 'predict_proba') and Y_train.nunique() > 1 else np.zeros(len(Y_test))
+                    roc_val = safe_auc_score(Y_test, prob)
+
+                    results.append({
+                        'Model': name,
+                        'Accuracy':  round(accuracy_score(Y_test, yp), 4),
+                        'Recall':    round(recall_score(Y_test, yp, zero_division=0), 4),
+                        'Precision': round(precision_score(Y_test, yp, zero_division=0), 4),
+                        'F1 Score':  round(f1_score(Y_test, yp, zero_division=0), 4),
+                        'ROC-AUC':   roc_val
+                    })
+
+            result_df = pd.DataFrame(results).sort_values('Recall', ascending=False)
+            st.subheader("Model Comparison Table")
+            st.dataframe(result_df.set_index('Model'), use_container_width=True)
+
+            fig, ax = plt.subplots(figsize=(10, 4))
+            metrics = ['Accuracy', 'Recall', 'Precision', 'F1 Score', 'ROC-AUC']
+            result_df.set_index('Model')[metrics].T.plot(kind='bar', ax=ax, colormap='Set2')
+            ax.set_title("All Models — Metric Benchmarks")
+            ax.set_ylabel("Score")
+            ax.legend(loc='lower right')
             plt.xticks(rotation=0)
             plt.tight_layout()
             st.pyplot(fig)
 
-        with col_b:
-            st.subheader("Tenure Distribution")
-            fig, ax = plt.subplots(figsize=(5, 3))
-            sns.histplot(df['Tenure Months'], bins=30, kde=True, ax=ax, color='steelblue')
-            ax.set_title("Tenure Months")
-            plt.tight_layout()
-            st.pyplot(fig)
+            best_name = result_df.iloc[0]['Model']
+            st.success(f"🏆 Best model by Recall: **{best_name}**")
+            st.info(f"📌 Using **{model_choice}** (your selected sidebar model) for subsequent evaluation and predictions.")
 
-        col_c, col_d = st.columns(2)
+        # ══════════════════════════════════════════
+        # TAB 3 — EVALUATION
+        # ══════════════════════════════════════════
+        with tab3:
+            st.header("📊 Model Evaluation")
 
-        with col_c:
-            st.subheader("Monthly Charges Distribution")
-            fig, ax = plt.subplots(figsize=(5, 3))
-            sns.histplot(df['Monthly Charges'], bins=30, kde=True, ax=ax, color='green')
-            plt.tight_layout()
-            st.pyplot(fig)
+            model = trained[model_choice]
+            y_pred = model.predict(X_test)
+            y_prob = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else np.zeros(len(Y_test))
 
-        with col_d:
-            st.subheader("Correlation Heatmap")
-            num_cols = ['Tenure Months', 'Monthly Charges', 'Total Charges', 'Churn Value']
-            num_cols = [c for c in num_cols if c in df.columns]
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.heatmap(df[num_cols].corr(), annot=True, fmt='.2f', cmap='coolwarm', ax=ax)
-            plt.tight_layout()
-            st.pyplot(fig)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Accuracy",  f"{accuracy_score(Y_test, y_pred):.2%}")
+            col2.metric("Recall",    f"{recall_score(Y_test, y_pred, zero_division=0):.2%}")
+            col3.metric("Precision", f"{precision_score(Y_test, y_pred, zero_division=0):.2%}")
+            col4.metric("F1 Score",  f"{f1_score(Y_test, y_pred, zero_division=0):.2%}")
 
-        st.subheader("Missing Values Summary")
-        missing = raw_df.isnull().sum()
-        missing = missing[missing > 0]
-        if len(missing) == 0:
-            st.success("✅ No missing values found in raw dataset!")
-        else:
-            st.warning(f"⚠️ {len(missing)} columns have missing values")
-            st.bar_chart(missing)
+            col_a, col_b = st.columns(2)
 
-    # ══════════════════════════════════════════
-    # TAB 2 — MODEL TRAINING
-    # ══════════════════════════════════════════
-    with tab2:
-        st.header("🏆 Model Training & Comparison")
-
-        with st.spinner("Training all 3 classification models..."):
-            all_models = {
-                "Random Forest": RandomForestClassifier(
-                    n_estimators=300, max_depth=10,
-                    random_state=42, class_weight='balanced'
-                ),
-                "Gradient Boosting": GradientBoostingClassifier(
-                    n_estimators=200, max_depth=5, random_state=42
-                ),
-                "Logistic Regression": LogisticRegression(
-                    max_iter=1000, random_state=42, class_weight='balanced'
-                )
-            }
-            results = []
-            trained = {}
-            for name, m in all_models.items():
-                m.fit(X_train, Y_train)
-                yp = m.predict(X_test)
-                trained[name] = m
-                
-                prob = m.predict_proba(X_test)[:, 1] if hasattr(m, 'predict_proba') and len(np.unique(Y_train)) > 1 else np.zeros(len(Y_test))
-                roc_val = round(roc_auc_score(Y_test, prob), 4) if len(np.unique(Y_test)) > 1 else 0.0
-
-                results.append({
-                    'Model': name,
-                    'Accuracy':  round(accuracy_score(Y_test, yp), 4),
-                    'Recall':    round(recall_score(Y_test, yp, zero_division=0), 4),
-                    'Precision': round(precision_score(Y_test, yp, zero_division=0), 4),
-                    'F1 Score':  round(f1_score(Y_test, yp, zero_division=0), 4),
-                    'ROC-AUC':   roc_val
-                })
-
-        result_df = pd.DataFrame(results).sort_values('Recall', ascending=False)
-        st.subheader("Model Comparison Table")
-        st.dataframe(result_df.set_index('Model'), use_container_width=True)
-
-        fig, ax = plt.subplots(figsize=(10, 4))
-        metrics = ['Accuracy', 'Recall', 'Precision', 'F1 Score', 'ROC-AUC']
-        result_df.set_index('Model')[metrics].T.plot(kind='bar', ax=ax, colormap='Set2')
-        ax.set_title("All Models — Metric Benchmarks")
-        ax.set_ylabel("Score")
-        ax.legend(loc='lower right')
-        plt.xticks(rotation=0)
-        plt.tight_layout()
-        st.pyplot(fig)
-
-        best_name = result_df.iloc[0]['Model']
-        st.success(f"🏆 Best model by Recall: **{best_name}**")
-        st.info(f"📌 Using **{model_choice}** (your selected sidebar model) for subsequent evaluation and predictions.")
-
-    # ══════════════════════════════════════════
-    # TAB 3 — EVALUATION
-    # ══════════════════════════════════════════
-    with tab3:
-        st.header("📊 Model Evaluation")
-
-        model = trained[model_choice]
-        y_pred = model.predict(X_test)
-        y_prob = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else np.zeros(len(Y_test))
-
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Accuracy",  f"{accuracy_score(Y_test, y_pred):.2%}")
-        col2.metric("Recall",    f"{recall_score(Y_test, y_pred, zero_division=0):.2%}")
-        col3.metric("Precision", f"{precision_score(Y_test, y_pred, zero_division=0):.2%}")
-        col4.metric("F1 Score",  f"{f1_score(Y_test, y_pred, zero_division=0):.2%}")
-
-        col_a, col_b = st.columns(2)
-
-        with col_a:
-            st.subheader("Confusion Matrix")
-            cm = confusion_matrix(Y_test, y_pred)
-            fig, ax = plt.subplots(figsize=(5, 4))
-            sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
-                        xticklabels=['No Churn', 'Churn'],
-                        yticklabels=['No Churn', 'Churn'])
-            ax.set_ylabel("Actual")
-            ax.set_xlabel("Predicted")
-            ax.set_title(f"Confusion Matrix — {model_choice}")
-            plt.tight_layout()
-            st.pyplot(fig)
-
-        with col_b:
-            st.subheader("ROC Curve")
-            if len(np.unique(Y_test)) > 1:
-                fpr, tpr, _ = roc_curve(Y_test, y_prob)
-                auc = roc_auc_score(Y_test, y_prob)
+            with col_a:
+                st.subheader("Confusion Matrix")
+                cm = confusion_matrix(Y_test, y_pred)
                 fig, ax = plt.subplots(figsize=(5, 4))
-                ax.plot(fpr, tpr, color='steelblue', label=f'AUC = {auc:.3f}')
-                ax.plot([0, 1], [0, 1], 'k--')
-                ax.set_xlabel("False Positive Rate")
-                ax.set_ylabel("True Positive Rate")
-                ax.set_title("ROC Curve")
-                ax.legend()
+                sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=ax,
+                            xticklabels=['No Churn', 'Churn'],
+                            yticklabels=['No Churn', 'Churn'])
+                ax.set_ylabel("Actual")
+                ax.set_xlabel("Predicted")
+                ax.set_title(f"Confusion Matrix — {model_choice}")
                 plt.tight_layout()
                 st.pyplot(fig)
-            else:
-                st.info("ROC Curve requires at least 2 classes in test set.")
 
-        if hasattr(model, 'feature_importances_'):
-            st.subheader("Top 15 Feature Importances")
-            imp = pd.Series(model.feature_importances_, index=X.columns)
-            imp = imp.sort_values(ascending=False).head(15)
-            fig, ax = plt.subplots(figsize=(10, 4))
-            imp.plot(kind='bar', ax=ax, color='steelblue')
-            ax.set_title("Feature Importances")
-            plt.tight_layout()
-            st.pyplot(fig)
-
-        st.subheader("Classification Report")
-        report = classification_report(Y_test, y_pred, output_dict=True, zero_division=0)
-        st.dataframe(pd.DataFrame(report).T.round(3), use_container_width=True)
-
-    # ══════════════════════════════════════════
-    # TAB 4 — SEGMENTS
-    # ══════════════════════════════════════════
-    with tab4:
-        st.header("🗂️ Customer Segmentation")
-
-        model = trained[model_choice]
-        churn_prob_all = model.predict_proba(X)[:, 1] if hasattr(model, 'predict_proba') else np.zeros(len(X))
-        
-        seg_df = pd.DataFrame({
-            'Tenure Months':     df['Tenure Months'].values,
-            'Monthly Charges':   df['Monthly Charges'].values,
-            'Total Charges':     df['Total Charges'].values,
-            'Churn Probability': churn_prob_all
-        })
-
-        scaler = StandardScaler()
-        scaled = scaler.fit_transform(seg_df)
-
-        with st.spinner("Running KMeans + Silhouette analysis..."):
-            wcss, sil = [], []
-            for k in range(2, 10):
-                km = KMeans(n_clusters=k, n_init=10, random_state=42)
-                lbl = km.fit_predict(scaled)
-                wcss.append(km.inertia_)
-                sil.append(silhouette_score(scaled, lbl))
-
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fig, ax = plt.subplots(figsize=(5, 3))
-            ax.plot(range(2, 10), wcss, marker='o', color='steelblue')
-            ax.set_title("Elbow Method (WCSS)")
-            ax.set_xlabel("k"); ax.set_ylabel("WCSS")
-            plt.tight_layout(); st.pyplot(fig)
-        with col_b:
-            fig, ax = plt.subplots(figsize=(5, 3))
-            ax.plot(range(2, 10), sil, marker='o', color='green')
-            ax.axvline(n_clusters, color='red', linestyle='--', label=f'k={n_clusters}')
-            ax.set_title("Silhouette Score")
-            ax.set_xlabel("k"); ax.legend()
-            plt.tight_layout(); st.pyplot(fig)
-
-        km_final = KMeans(n_clusters=n_clusters, n_init=10, random_state=42)
-        seg_df['Cluster'] = km_final.fit_predict(scaled)
-
-        # Auto-name clusters by churn probability
-        cp_rank = seg_df.groupby('Cluster')['Churn Probability'].mean().sort_values()
-        names = {}
-        for i, c in enumerate(cp_rank.index):
-            if i == 0:
-                names[c] = 'Loyal Low-Risk'
-            elif i == len(cp_rank) - 1:
-                names[c] = 'High-Risk'
-            else:
-                names[c] = f'Medium-Risk {i}'
-        seg_df['Segment'] = seg_df['Cluster'].map(names)
-
-        st.subheader("Cluster Profiles & Mean Feature Summary")
-        st.dataframe(seg_df.groupby('Segment').mean().round(2), use_container_width=True)
-
-        col_c, col_d = st.columns(2)
-        with col_c:
-            fig, ax = plt.subplots(figsize=(5, 4))
-            for seg, grp in seg_df.groupby('Segment'):
-                ax.scatter(grp['Monthly Charges'], grp['Churn Probability'],
-                           label=seg, alpha=0.4, s=8)
-            ax.set_xlabel("Monthly Charges")
-            ax.set_ylabel("Churn Probability")
-            ax.set_title("Monthly Charges vs Churn Probability")
-            ax.legend(fontsize=7)
-            plt.tight_layout(); st.pyplot(fig)
-
-        with col_d:
-            seg_counts = seg_df['Segment'].value_counts()
-            fig, ax = plt.subplots(figsize=(5, 4))
-            seg_counts.plot(kind='bar', ax=ax, colormap='Set2')
-            ax.set_title("Customer Count per Segment")
-            ax.set_ylabel("Count")
-            plt.xticks(rotation=20)
-            plt.tight_layout(); st.pyplot(fig)
-
-        st.session_state['seg_df'] = seg_df
-
-    # ══════════════════════════════════════════
-    # TAB 5 — RECOMMENDATIONS
-    # ══════════════════════════════════════════
-    with tab5:
-        st.header("💡 Business Recommendations")
-
-        if 'seg_df' not in st.session_state:
-            st.warning("Please run segmentation in Tab 4 first.")
-        else:
-            seg_df = st.session_state['seg_df']
-            seg_df['Revenue at Risk'] = (
-                seg_df['Monthly Charges'] * seg_df['Churn Probability']
-            )
-
-            profile = seg_df.groupby('Segment').agg(
-                Customers       = ('Segment', 'count'),
-                Avg_Churn_Prob  = ('Churn Probability', 'mean'),
-                Avg_Monthly     = ('Monthly Charges', 'mean'),
-                Revenue_at_Risk = ('Revenue at Risk', 'sum')
-            ).round(2)
-
-            st.subheader("Segment Risk Profiles")
-            st.dataframe(profile, use_container_width=True)
-
-            st.subheader("💰 Monthly Revenue at Risk per Segment")
-            fig, ax = plt.subplots(figsize=(7, 3))
-            profile['Revenue_at_Risk'].sort_values().plot(
-                kind='barh', ax=ax, colormap='Set2'
-            )
-            ax.set_title("Revenue at Risk per Segment ($)")
-            plt.tight_layout(); st.pyplot(fig)
-
-            st.subheader("📋 Recommended Strategic Actions")
-            for seg in profile.index:
-                cp = profile.loc[seg, 'Avg_Churn_Prob']
-                n  = int(profile.loc[seg, 'Customers'])
-                rev = profile.loc[seg, 'Revenue_at_Risk']
-
-                if 'High' in seg:
-                    color = '🔴'
-                    actions = [
-                        "Immediate personalized retention outreach (phone/email within 48h)",
-                        "Offer targeted loyalty discounts or contract upgrade incentives",
-                        "Assign dedicated account manager to address service complaints"
-                    ]
-                elif 'Medium' in seg:
-                    color = '🟡'
-                    actions = [
-                        "Send automated customer satisfaction survey to identify pain points",
-                        "Offer value-add add-on services (security, tech support, streaming)",
-                        "Enroll in customer loyalty program and referral rewards"
-                    ]
+            with col_b:
+                st.subheader("ROC Curve")
+                if Y_test.nunique() > 1:
+                    fpr, tpr, _ = roc_curve(Y_test, y_prob)
+                    auc = safe_auc_score(Y_test, y_prob)
+                    fig, ax = plt.subplots(figsize=(5, 4))
+                    ax.plot(fpr, tpr, color='steelblue', label=f'AUC = {auc:.3f}')
+                    ax.plot([0, 1], [0, 1], 'k--')
+                    ax.set_xlabel("False Positive Rate")
+                    ax.set_ylabel("True Positive Rate")
+                    ax.set_title("ROC Curve")
+                    ax.legend()
+                    plt.tight_layout()
+                    st.pyplot(fig)
                 else:
-                    color = '🟢'
-                    actions = [
-                        "Upsell to premium long-term plan tiers",
-                        "Incentivize multi-line family or business referrals",
-                        "Reward continued tenure with anniversary bonus perks"
-                    ]
+                    st.info("ROC Curve requires at least 2 distinct target classes in test set.")
 
-                with st.expander(f"{color} {seg} — {n} customers | Churn Prob: {cp:.0%} | Revenue at Risk: ${rev:,.0f}"):
-                    for a in actions:
-                        st.write(f"→ {a}")
+            if hasattr(model, 'feature_importances_'):
+                st.subheader("Top 15 Feature Importances")
+                imp = pd.Series(model.feature_importances_, index=X.columns)
+                imp = imp.sort_values(ascending=False).head(15)
+                fig, ax = plt.subplots(figsize=(10, 4))
+                imp.plot(kind='bar', ax=ax, color='steelblue')
+                ax.set_title("Feature Importances")
+                plt.tight_layout()
+                st.pyplot(fig)
 
-            st.subheader("📌 Executive Summary Table")
-            profile['Action'] = profile.index.map(
-                lambda s: 'IMMEDIATE RETENTION' if 'High' in s else ('MONITOR & ENGAGE' if 'Medium' in s else 'UPSELL & REWARD')
-            )
-            st.dataframe(profile, use_container_width=True)
+            st.subheader("Classification Report")
+            report = classification_report(Y_test, y_pred, output_dict=True, zero_division=0)
+            st.dataframe(pd.DataFrame(report).T.round(3), use_container_width=True)
+
+        # ══════════════════════════════════════════
+        # TAB 4 — SEGMENTS
+        # ══════════════════════════════════════════
+        with tab4:
+            st.header("🗂️ Customer Segmentation")
+
+            model = trained[model_choice]
+            churn_prob_all = model.predict_proba(X)[:, 1] if hasattr(model, 'predict_proba') and Y_train.nunique() > 1 else np.zeros(len(X))
+            
+            seg_df = pd.DataFrame({
+                'Tenure Months':     df['Tenure Months'].values,
+                'Monthly Charges':   df['Monthly Charges'].values,
+                'Total Charges':     df['Total Charges'].values,
+                'Churn Probability': churn_prob_all
+            }).replace([np.inf, -np.inf], 0).fillna(0)
+
+            scaler = StandardScaler()
+            scaled = scaler.fit_transform(seg_df)
+
+            actual_k = min(n_clusters, len(seg_df) - 1) if len(seg_df) > 2 else 2
+
+            with st.spinner("Running KMeans + Silhouette analysis..."):
+                wcss, sil = [], []
+                k_range = range(2, min(10, max(3, len(seg_df))))
+                for k in k_range:
+                    km = KMeans(n_clusters=k, n_init=10, random_state=42)
+                    lbl = km.fit_predict(scaled)
+                    wcss.append(km.inertia_)
+                    if len(set(lbl)) > 1:
+                        sil.append(silhouette_score(scaled, lbl))
+                    else:
+                        sil.append(0.0)
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.plot(list(k_range), wcss, marker='o', color='steelblue')
+                ax.set_title("Elbow Method (WCSS)")
+                ax.set_xlabel("k"); ax.set_ylabel("WCSS")
+                plt.tight_layout(); st.pyplot(fig)
+            with col_b:
+                fig, ax = plt.subplots(figsize=(5, 3))
+                ax.plot(list(k_range), sil, marker='o', color='green')
+                ax.axvline(actual_k, color='red', linestyle='--', label=f'k={actual_k}')
+                ax.set_title("Silhouette Score")
+                ax.set_xlabel("k"); ax.legend()
+                plt.tight_layout(); st.pyplot(fig)
+
+            km_final = KMeans(n_clusters=actual_k, n_init=10, random_state=42)
+            seg_df['Cluster'] = km_final.fit_predict(scaled)
+
+            # Auto-name clusters by churn probability
+            cp_rank = seg_df.groupby('Cluster')['Churn Probability'].mean().sort_values()
+            names = {}
+            for i, c in enumerate(cp_rank.index):
+                if i == 0:
+                    names[c] = 'Loyal Low-Risk'
+                elif i == len(cp_rank) - 1:
+                    names[c] = 'High-Risk'
+                else:
+                    names[c] = f'Medium-Risk {i}'
+            seg_df['Segment'] = seg_df['Cluster'].map(names)
+
+            st.subheader("Cluster Profiles & Mean Feature Summary")
+            st.dataframe(seg_df.groupby('Segment').mean().round(2), use_container_width=True)
+
+            col_c, col_d = st.columns(2)
+            with col_c:
+                fig, ax = plt.subplots(figsize=(5, 4))
+                for seg, grp in seg_df.groupby('Segment'):
+                    ax.scatter(grp['Monthly Charges'], grp['Churn Probability'],
+                               label=seg, alpha=0.4, s=8)
+                ax.set_xlabel("Monthly Charges")
+                ax.set_ylabel("Churn Probability")
+                ax.set_title("Monthly Charges vs Churn Probability")
+                ax.legend(fontsize=7)
+                plt.tight_layout(); st.pyplot(fig)
+
+            with col_d:
+                seg_counts = seg_df['Segment'].value_counts()
+                fig, ax = plt.subplots(figsize=(5, 4))
+                seg_counts.plot(kind='bar', ax=ax, colormap='Set2')
+                ax.set_title("Customer Count per Segment")
+                ax.set_ylabel("Count")
+                plt.xticks(rotation=20)
+                plt.tight_layout(); st.pyplot(fig)
+
+            st.session_state['seg_df'] = seg_df
+
+        # ══════════════════════════════════════════
+        # TAB 5 — RECOMMENDATIONS
+        # ══════════════════════════════════════════
+        with tab5:
+            st.header("💡 Business Recommendations")
+
+            if 'seg_df' not in st.session_state:
+                st.warning("Please run segmentation in Tab 4 first.")
+            else:
+                seg_df = st.session_state['seg_df']
+                seg_df['Revenue at Risk'] = (
+                    seg_df['Monthly Charges'] * seg_df['Churn Probability']
+                )
+
+                profile = seg_df.groupby('Segment').agg(
+                    Customers       = ('Segment', 'count'),
+                    Avg_Churn_Prob  = ('Churn Probability', 'mean'),
+                    Avg_Monthly     = ('Monthly Charges', 'mean'),
+                    Revenue_at_Risk = ('Revenue at Risk', 'sum')
+                ).round(2)
+
+                st.subheader("Segment Risk Profiles")
+                st.dataframe(profile, use_container_width=True)
+
+                st.subheader("💰 Monthly Revenue at Risk per Segment")
+                fig, ax = plt.subplots(figsize=(7, 3))
+                profile['Revenue_at_Risk'].sort_values().plot(
+                    kind='barh', ax=ax, colormap='Set2'
+                )
+                ax.set_title("Revenue at Risk per Segment ($)")
+                plt.tight_layout(); st.pyplot(fig)
+
+                st.subheader("📋 Recommended Strategic Actions")
+                for seg in profile.index:
+                    cp = profile.loc[seg, 'Avg_Churn_Prob']
+                    n  = int(profile.loc[seg, 'Customers'])
+                    rev = profile.loc[seg, 'Revenue_at_Risk']
+
+                    if 'High' in seg:
+                        color = '🔴'
+                        actions = [
+                            "Immediate personalized retention outreach (phone/email within 48h)",
+                            "Offer targeted loyalty discounts or contract upgrade incentives",
+                            "Assign dedicated account manager to address service complaints"
+                        ]
+                    elif 'Medium' in seg:
+                        color = '🟡'
+                        actions = [
+                            "Send automated customer satisfaction survey to identify pain points",
+                            "Offer value-add add-on services (security, tech support, streaming)",
+                            "Enroll in customer loyalty program and referral rewards"
+                        ]
+                    else:
+                        color = '🟢'
+                        actions = [
+                            "Upsell to premium long-term plan tiers",
+                            "Incentivize multi-line family or business referrals",
+                            "Reward continued tenure with anniversary bonus perks"
+                        ]
+
+                    with st.expander(f"{color} {seg} — {n} customers | Churn Prob: {cp:.0%} | Revenue at Risk: ${rev:,.0f}"):
+                        for a in actions:
+                            st.write(f"→ {a}")
+
+                st.subheader("📌 Executive Summary Table")
+                profile['Action'] = profile.index.map(
+                    lambda s: 'IMMEDIATE RETENTION' if 'High' in s else ('MONITOR & ENGAGE' if 'Medium' in s else 'UPSELL & REWARD')
+                )
+                st.dataframe(profile, use_container_width=True)
+
+    except Exception as err:
+        st.error(f"⚠️ An error occurred while processing this dataset: {str(err)}")
+        st.info("💡 **Tip**: Open the **'🔧 Column Configuration & Overrides'** expander in the left sidebar to manually select the correct Target (Churn) and Feature columns for your dataset.")
 
 else:
     st.info("👈 Upload your Excel or CSV file in the sidebar and click **Run Full Pipeline** to begin analysis.")
